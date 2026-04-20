@@ -2,7 +2,7 @@
 name = "sso-proxy-worker"
 main = "src/index.ts"
 compatibility_date = "2024-10-22"
-account_id = "e303e7c2b1c69f96ea3dbffedee4b579"
+account_id = "<cf-account-id>"
 compatibility_flags = ["nodejs_compat"]
 
 # Workers Logs
@@ -13,8 +13,8 @@ enabled = true
 
 # CHANGE ME!!
 [[routes]]
-pattern = "auth.reuven-sso.descope.team/auth/*"
-zone_name = "reuven-sso.descope.team"
+pattern = "<pattern>"
+zone_name = "<zone>"
 
 # Automatically place your workloads in an optimal location to minimize latency.
 # If you are running back-end logic in a Worker, running it closer to your back-end infrastructure
