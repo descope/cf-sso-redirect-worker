@@ -1,0 +1,6 @@
+{
+	"<domain>": {
+		"newCname": "<new-cname>",
+		"projectId": "<descope-projectId>"
+	}
+}
