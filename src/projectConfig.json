@@ -1,6 +1,21 @@
 {
-	"<domain>": {
-		"newCname": "<new-cname>",
-		"projectId": "<descope-projectId>"
+	"<your-custom-domain>": {
+		"newCname": "<your-descope-cname>",
+		"projectId": "<your-descope-project-id>",
+		"sso": {
+			"enabled": true,
+			"logOnly": false,
+			"tenants": "*"
+		},
+		"scim": {
+			"enabled": false,
+			"logOnly": false,
+			"tenants": {
+				"<connection_id>": {
+					"tenantId": "<descope_tenant_id>",
+					"token": "Bearer <descope_project_id>:<descope_scim_token>"
+				}
+			}
+		}
 	}
 }
