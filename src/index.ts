@@ -1,12 +1,8 @@
 import projectConfig from './projectConfig.json';
 
-// SSO tenants: '*' = all tenants; string[] = allowlist of Descope tenant IDs (logic TBD)
-type SsoTenantFilter = '*' | string[];
-
 type SsoConfig = {
-  enabled?: boolean;         // defaults to true
-  logOnly?: boolean;         // defaults to false — logs the intended rewrite but forwards the original request unchanged
-  tenants?: SsoTenantFilter; // defaults to '*'
+  enabled?: boolean;  // defaults to true
+  logOnly?: boolean;  // defaults to false — logs the intended rewrite but forwards the original request unchanged
 };
 
 // SCIM tenants: '*' = pass all requests through without token replacement
@@ -30,6 +26,11 @@ type ProjectConfig = {
   sso?: SsoConfig;
   scim?: ScimConfig;
 };
+
+// Appended to sub-requests that should pass through to origin unchanged.
+// On re-entry the worker detects this header, strips it, and bypasses all
+// rewrite logic — preventing a route-triggered infinite loop (CF error 1042).
+const PASS_HEADER = 'x-cf-no-redirect';
 
 function normalizeHostname(newCname?: string): string {
   if (!newCname) {
@@ -92,8 +93,32 @@ function buildDescopeScimUrl(inputUrl: string, config: ProjectConfig): string {
   return url.toString();
 }
 
+function passThrough(request: Request): Promise<Response> {
+  const headers = new Headers(request.headers);
+  headers.set(PASS_HEADER, '1');
+  return fetch(new Request(request.url, {
+    method: request.method,
+    headers,
+    body: request.body,
+    redirect: request.redirect,
+  }));
+}
+
 export default {
   async fetch(request, _env, _ctx): Promise<Response> {
+    // Short-circuit: sentinel set by a prior passThrough() call.
+    // Strip the header so origin does not see it, then forward.
+    if (request.headers.get(PASS_HEADER)) {
+      const headers = new Headers(request.headers);
+      headers.delete(PASS_HEADER);
+      return fetch(new Request(request.url, {
+        method: request.method,
+        headers,
+        body: request.body,
+        redirect: request.redirect,
+      }));
+    }
+
     const requestUrl = new URL(request.url);
     const hostname = requestUrl.hostname;
 
@@ -101,7 +126,7 @@ export default {
 
     if (!config) {
       console.log('No config found for hostname, forwarding as-is:', hostname);
-      return fetch(new Request(request.url, request));
+      return passThrough(request);
     }
 
     console.log('Incoming request for hostname:', hostname, request.method, requestUrl.pathname);
@@ -115,7 +140,7 @@ export default {
 
       if (config.scim?.logOnly) {
         console.log('[SCIM logOnly] would proxy to:', targetUrl, '— forwarding original request unchanged');
-        return fetch(new Request(request.url, request));
+        return passThrough(request);
       }
 
       const scimHeaders = new Headers(request.headers);
@@ -156,7 +181,7 @@ export default {
 
     if (!ssoEnabled) {
       console.log('SSO disabled for hostname, forwarding as-is:', hostname);
-      return fetch(new Request(request.url, request));
+      return passThrough(request);
     }
 
     let shouldRewrite = false;
@@ -190,14 +215,14 @@ export default {
 
     if (!shouldRewrite) {
       console.log('No SSO rewrite conditions met, forwarding original request');
-      return fetch(new Request(request.url, request));
+      return passThrough(request);
     }
 
     const targetUrl = buildDescopeAcsUrl(request.url, config);
 
     if (config.sso?.logOnly) {
       console.log('[SSO logOnly] would proxy to:', targetUrl, '— forwarding original request unchanged');
-      return fetch(new Request(request.url, request));
+      return passThrough(request);
     }
 
     console.log('Proxying to Descope ACS:', targetUrl);

@@ -4,8 +4,7 @@
 		"projectId": "<your-descope-project-id>",
 		"sso": {
 			"enabled": true,
-			"logOnly": false,
-			"tenants": "*"
+			"logOnly": false
 		},
 		"scim": {
 			"enabled": false,
