@@ -1,0 +1,5 @@
+node_modules/
+
+# projectConfig.json holds SCIM bearer tokens and must never be committed.
+# Copy src/projectConfig.example.json → src/projectConfig.json and fill in real values.
+src/projectConfig.json
