@@ -43,8 +43,22 @@ vi.mock('../src/projectConfig.json', () => ({
     'logonly.example.com': {
       newCname: CNAME,
       projectId: PROJECT_ID,
-      sso: { enabled: true, logOnly: true, tenants: '*' },
+      sso: { enabled: true, logOnly: true },
       scim: { enabled: true, logOnly: true, tenants: '*' },
+    },
+    'sso-tenant-map.example.com': {
+      newCname: CNAME,
+      projectId: PROJECT_ID,
+      sso: {
+        enabled: true,
+        logOnly: true, // top-level default: log-only
+        tenants: {
+          'conn-live':    { enabled: true, logOnly: false },
+          'conn-logonly': { enabled: true, logOnly: true },
+          'conn-off':     { enabled: false },
+        },
+      },
+      scim: { enabled: false },
     },
     'scim-wildcard.example.com': {
       newCname: CNAME,
@@ -285,6 +299,61 @@ describe('SSO Redirect Worker', () => {
         { headers: { Authorization: 'Bearer original-token' } },
       );
       await callWorker(req);
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(new URL(called.url).hostname).toBe('logonly.example.com');
+    });
+  });
+
+  // ── SSO per-tenant tenant map ───────────────────────────────────────────────
+
+  describe('SSO per-tenant map (connection query param)', () => {
+    // Helper: SAML POST to sso-tenant-map.example.com with an optional ?connection=
+    function tenantSamlPost(connection?: string) {
+      const url = new URL('https://sso-tenant-map.example.com/login/callback');
+      if (connection) url.searchParams.set('connection', connection);
+      return new IncomingRequest(url.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ SAMLResponse: 'base64encodedresponse' }).toString(),
+      });
+    }
+
+    it('tenant found + live: rewrites to Descope ACS (overrides top-level logOnly)', async () => {
+      await callWorker(tenantSamlPost('conn-live'));
+      const called: Request = mockFetch.mock.calls[0][0];
+      const url = new URL(called.url);
+      expect(url.hostname).toBe(CNAME);
+      expect(url.pathname).toBe('/v1/auth/saml/acs');
+      expect(url.searchParams.get('projectId')).toBe(PROJECT_ID);
+    });
+
+    it('tenant found + logOnly: logs and forwards original request unchanged', async () => {
+      await callWorker(tenantSamlPost('conn-logonly'));
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(new URL(called.url).hostname).toBe('sso-tenant-map.example.com');
+    });
+
+    it('tenant found + disabled: forwards original request unchanged', async () => {
+      await callWorker(tenantSamlPost('conn-off'));
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(new URL(called.url).hostname).toBe('sso-tenant-map.example.com');
+    });
+
+    it('tenant not in map: falls back to top-level logOnly, forwards unchanged', async () => {
+      await callWorker(tenantSamlPost('conn-unknown'));
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(new URL(called.url).hostname).toBe('sso-tenant-map.example.com');
+    });
+
+    it('no connection param: falls back to top-level logOnly, forwards unchanged', async () => {
+      await callWorker(tenantSamlPost()); // no ?connection=
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(new URL(called.url).hostname).toBe('sso-tenant-map.example.com');
+    });
+
+    it('no tenants block: top-level settings apply as before (existing behavior)', async () => {
+      // logonly.example.com has no tenants map — top-level logOnly: true should forward unchanged
+      await callWorker(samlPost('logonly.example.com', 's/test'));
       const called: Request = mockFetch.mock.calls[0][0];
       expect(new URL(called.url).hostname).toBe('logonly.example.com');
     });

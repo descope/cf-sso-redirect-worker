@@ -1,8 +1,14 @@
 import projectConfig from './projectConfig.json';
 
+type SsoTenantEntry = {
+  enabled?: boolean;  // overrides sso.enabled for this connection
+  logOnly?: boolean;  // overrides sso.logOnly for this connection
+};
+
 type SsoConfig = {
   enabled?: boolean;  // defaults to true
   logOnly?: boolean;  // defaults to false — logs the intended rewrite but forwards the original request unchanged
+  tenants?: Record<string, SsoTenantEntry>; // key = connection query param value; overrides top-level per-tenant
 };
 
 // SCIM tenants: '*' = pass all requests through without token replacement
@@ -177,7 +183,23 @@ export default {
     }
 
     // ── SSO ───────────────────────────────────────────────────────────────────
-    const ssoEnabled = config.sso?.enabled ?? true;
+
+    // Resolve effective SSO settings: per-tenant entry (keyed by `connection` query param)
+    // overrides top-level defaults. Falls back to top-level when no tenants map is defined
+    // or when the connection value is not found in the map.
+    const connection = requestUrl.searchParams.get('connection');
+    const tenantEntry = connection ? config.sso?.tenants?.[connection] : undefined;
+    const ssoEnabled = tenantEntry?.enabled ?? (config.sso?.enabled ?? true);
+    const ssoLogOnly = tenantEntry?.logOnly ?? (config.sso?.logOnly ?? false);
+
+    if (connection && config.sso?.tenants) {
+      console.log(
+        'SSO connection:', connection,
+        tenantEntry
+          ? `(per-tenant: enabled=${ssoEnabled}, logOnly=${ssoLogOnly})`
+          : '(not in tenant map, using top-level defaults)',
+      );
+    }
 
     if (!ssoEnabled) {
       console.log('SSO disabled for hostname, forwarding as-is:', hostname);
@@ -220,7 +242,7 @@ export default {
 
     const targetUrl = buildDescopeAcsUrl(request.url, config);
 
-    if (config.sso?.logOnly) {
+    if (ssoLogOnly) {
       console.log('[SSO logOnly] would proxy to:', targetUrl, '— forwarding original request unchanged');
       return passThrough(request);
     }
