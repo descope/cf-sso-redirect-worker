@@ -52,6 +52,21 @@ vi.mock('../src/projectConfig.json', () => ({
       sso: { enabled: false },
       scim: { enabled: true, tenants: '*' },
     },
+    'scim-logonly-tenants.example.com': {
+      newCname: CNAME,
+      projectId: PROJECT_ID,
+      sso: { enabled: false },
+      scim: {
+        enabled: true,
+        logOnly: true,
+        tenants: {
+          con_test123: {
+            tenantId: 'descope-tenant-abc',
+            token: `Bearer ${PROJECT_ID}:scim-token-abc`,
+          },
+        },
+      },
+    },
   },
 }));
 
@@ -287,6 +302,30 @@ describe('SSO Redirect Worker', () => {
       await callWorker(req);
       const called: Request = mockFetch.mock.calls[0][0];
       expect(new URL(called.url).hostname).toBe('logonly.example.com');
+    });
+
+    it('with a tenant map and a known connection ID: logs the match and passes through unchanged', async () => {
+      const req = new IncomingRequest(
+        'https://scim-logonly-tenants.example.com/scim/v2/connections/con_test123/Users',
+        { headers: { Authorization: 'Bearer original-token' } },
+      );
+      await callWorker(req);
+      const called: Request = mockFetch.mock.calls[0][0];
+      // Not rewritten to the Descope CNAME/target — original request forwarded as-is
+      expect(new URL(called.url).hostname).toBe('scim-logonly-tenants.example.com');
+      // Authorization header is NOT swapped for the tenant's token
+      expect(called.headers.get('Authorization')).toBe('Bearer original-token');
+    });
+
+    it('with a tenant map and an unrecognized connection ID: logs the rejection and passes through unchanged (no 401)', async () => {
+      const req = new IncomingRequest(
+        'https://scim-logonly-tenants.example.com/scim/v2/connections/con_unknown/Users',
+        { headers: { Authorization: 'Bearer original-token' } },
+      );
+      const response = await callWorker(req);
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(new URL(called.url).hostname).toBe('scim-logonly-tenants.example.com');
+      expect(response.status).not.toBe(401);
     });
   });
 
