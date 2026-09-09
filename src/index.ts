@@ -137,31 +137,35 @@ export default {
     if (scimEnabled && requestUrl.pathname.startsWith('/scim')) {
       const targetUrl = buildDescopeScimUrl(request.url, config);
       const scimTenants = config.scim!.tenants ?? '*';
-
-      if (config.scim?.logOnly) {
-        console.log('[SCIM logOnly] would proxy to:', targetUrl, '— forwarding original request unchanged');
-        return passThrough(request);
-      }
+      const scimLogOnly = config.scim?.logOnly ?? false;
 
       const scimHeaders = new Headers(request.headers);
 
       if (scimTenants === '*') {
         // All tenants allowed — forward original Authorization header as-is
+        if (scimLogOnly) {
+          console.log('[SCIM logOnly] would proxy to:', targetUrl, '(all tenants) — forwarding original request unchanged');
+          return passThrough(request);
+        }
         console.log('SCIM request detected (all tenants), proxying to:', targetUrl);
       } else {
         // Tenant map — look up the connection ID extracted from the SCIM path
         const connectionId = extractScimConnectionId(requestUrl.pathname);
+        const tenantEntry = connectionId ? (scimTenants as ScimTenantMap)[connectionId] : undefined;
 
-        if (!connectionId) {
-          console.warn('SCIM request rejected — could not extract connection ID from path:', requestUrl.pathname);
+        if (!connectionId || !tenantEntry) {
+          const idDescription = connectionId ?? '(none)';
+          if (scimLogOnly) {
+            console.warn('[SCIM logOnly] would reject — unrecognized connection ID:', idDescription, '— forwarding original request unchanged');
+            return passThrough(request);
+          }
+          console.warn('SCIM request rejected — unrecognized connection ID:', idDescription, 'for hostname:', hostname);
           return new Response('Unauthorized', { status: 401 });
         }
 
-        const tenantEntry = (scimTenants as ScimTenantMap)[connectionId];
-
-        if (!tenantEntry) {
-          console.warn('SCIM request rejected — unrecognized connection ID:', connectionId, 'for hostname:', hostname);
-          return new Response('Unauthorized', { status: 401 });
+        if (scimLogOnly) {
+          console.log('[SCIM logOnly] would proxy to:', targetUrl, 'for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+          return passThrough(request);
         }
 
         console.log('SCIM request detected for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — proxying to:', targetUrl);

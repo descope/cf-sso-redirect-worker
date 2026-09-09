@@ -152,7 +152,7 @@ https://<newCname>/v1/auth/saml/acs?projectId=<projectId>
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable or disable SCIM proxying for this hostname |
-| `logOnly` | `false` | When `true`, logs the intended rewrite but forwards the original request unchanged — useful for validating detection before going live |
+| `logOnly` | `false` | When `true`, still runs the full tenant lookup but only logs the outcome — a would-be proxy (`[SCIM logOnly] would proxy to: ...`) or a would-be rejection (`[SCIM logOnly] would reject — unrecognized connection ID: ...`) — and always forwards the original request unchanged instead of proxying or returning 401. Useful for validating both routing and tenant-ID recognition before going live |
 | `tenants` | `"*"` | `"*"` = proxy all requests, forwarding the original `Authorization` header as-is; map = per-tenant token swap (see below) |
 
 **Tenant map** — when `tenants` is an object, each key must equal the path segment that appears **immediately before the SCIM resource type** in the incoming URL, regardless of what that segment represents in your IdP (connection ID, tenant slug, org ID, etc.):
