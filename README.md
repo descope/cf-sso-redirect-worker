@@ -66,7 +66,7 @@ export CLOUDFLARE_ACCOUNT_ID=<YOUR_ACCOUNT_ID>   # found at dash.cloudflare.com 
 
 ### 1. Clone the repo
 ```
-git clone https://github.com/descope/sso-redirect-worker.git
+git clone https://github.com/descope/cf-sso-redirect-worker.git
 ```
 
 ### 2. Configure `wrangler.toml`
