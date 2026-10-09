@@ -4,7 +4,20 @@
 		"projectId": "<your-descope-project-id>",
 		"sso": {
 			"enabled": true,
-			"logOnly": false
+			"logOnly": true,
+			"tenants": {
+				"<connection-name-live>": {
+					"enabled": true,
+					"logOnly": false
+				},
+				"<connection-name-logonly>": {
+					"enabled": true,
+					"logOnly": true
+				},
+				"<connection-name-disabled>": {
+					"enabled": false
+				}
+			}
 		},
 		"scim": {
 			"enabled": false,

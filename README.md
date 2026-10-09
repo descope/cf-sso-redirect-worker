@@ -141,11 +141,35 @@ This file maps each incoming hostname to its Descope project. Each entry has a t
 |---|---|---|
 | `enabled` | `true` | Enable or disable SSO proxying for this hostname |
 | `logOnly` | `false` | When `true`, logs the intended rewrite but forwards the original request unchanged — useful for validating detection before going live |
+| `tenants` | _(none)_ | Optional per-connection overrides — see below |
 
 SAML requests are rewritten to:
 ```
 https://<newCname>/v1/auth/saml/acs?projectId=<projectId>
 ```
+
+**Per-tenant rollout** — when `tenants` is defined, the worker reads the `connection` query parameter from the incoming ACS URL (e.g. `?connection=sso-conn-a`) and looks it up in the map. The matching entry's `enabled` / `logOnly` values override the top-level defaults for that connection. Connections not present in the map, and requests without a `connection` param, fall back to the top-level `enabled` / `logOnly`.
+
+```json
+"sso": {
+  "enabled": true,
+  "logOnly": true,
+  "tenants": {
+    "sso-conn-a": { "enabled": true,  "logOnly": false },
+    "sso-conn-b": { "enabled": true,  "logOnly": true  },
+    "sso-conn-c": { "enabled": false                   }
+  }
+}
+```
+
+Per-tenant behavior:
+
+| Tenant config | Result |
+|---|---|
+| `enabled: true, logOnly: false` | Rewrite to Descope ACS — connection is live |
+| `enabled: true, logOnly: true` | Log the intended rewrite, forward original request unchanged |
+| `enabled: false` | Forward original request unchanged, no logging |
+| _(not in map)_ | Fall back to top-level `enabled` / `logOnly` |
 
 #### `scim` block
 
