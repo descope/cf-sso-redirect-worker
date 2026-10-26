@@ -195,16 +195,17 @@ export default {
 
       if (contentType.includes('application/x-www-form-urlencoded')) {
         const formData = await request.clone().formData();
+        const samlResponse = formData.get('SAMLResponse')?.toString();
         const relayState = formData.get('RelayState')?.toString();
 
-        if (relayState?.startsWith('s/')) {
+        if (!samlResponse) {
+          console.log('Form POST without SAMLResponse, forwarding as-is');
+        } else if (relayState?.startsWith('s/')) {
           console.log('Descope SP-initiated SAML request detected');
           shouldRewrite = true;
-        } else if (!relayState) {
-          console.log('IDP-initiated SAML request detected (no RelayState)');
-          shouldRewrite = true;
         } else {
-          console.log('RelayState exists but not Descope format, forwarding as-is:', relayState);
+          console.log('IDP-initiated SAML request detected, RelayState:', relayState ?? '(none)');
+          shouldRewrite = true;
         }
       } else {
         console.warn('Unexpected Content-Type for SAML POST binding, forwarding as-is:', contentType);

@@ -185,10 +185,29 @@ describe('SSO Redirect Worker', () => {
   // ── Non-Descope RelayState ──────────────────────────────────────────────────
 
   describe('SAML POST with non-Descope RelayState', () => {
-    it('forwards the original request unchanged', async () => {
+    it('rewrites to Descope ACS URL (IdP-initiated with app RelayState)', async () => {
       await callWorker(samlPost(HOSTNAME, 'some-other-value'));
       const called: Request = mockFetch.mock.calls[0][0];
+      const url = new URL(called.url);
+      expect(url.hostname).toBe(CNAME);
+      expect(url.pathname).toBe('/v1/auth/saml/acs');
+      expect(url.searchParams.get('projectId')).toBe(PROJECT_ID);
+    });
+  });
+
+  // ── Form POST without SAMLResponse ──────────────────────────────────────────
+
+  describe('form POST without SAMLResponse', () => {
+    it('forwards the original request unchanged, even without RelayState', async () => {
+      const req = new IncomingRequest(`https://${HOSTNAME}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ username: 'jdoe' }).toString(),
+      });
+      await callWorker(req);
+      const called: Request = mockFetch.mock.calls[0][0];
       expect(new URL(called.url).hostname).toBe(HOSTNAME);
+      expect(called.headers.get('x-cf-no-redirect')).toBe('1');
     });
   });
 

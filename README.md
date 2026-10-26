@@ -33,7 +33,9 @@ This utility integrates with step #4 to perform the necessary redirection logic 
 The worker supports two SAML flows:
 
 - **SP-initiated**: The user starts login from your app. Descope sets a `RelayState` starting with `s/` on the SAML request, which is echoed back by the IdP in its POST response. The worker detects this and routes to the Descope ACS endpoint.
-- **IDP-initiated**: The user starts login directly from the IdP (no prior SP request, no `RelayState`). The worker detects the absence of `RelayState` and routes to the Descope ACS endpoint with the project ID appended as `?projectId=...`.
+- **IDP-initiated**: The user starts login directly from the IdP (no prior SP request). The IdP may send no `RelayState` or an app-specific one; either way the worker routes the `SAMLResponse` to the Descope ACS endpoint with the project ID appended as `?projectId=...`.
+
+Only form POSTs that carry a `SAMLResponse` are routed to Descope. Any other form POST is forwarded to the origin unchanged.
 
 A single worker instance can handle **multiple Descope projects** by mapping each incoming hostname to its own configuration in `src/projectConfig.json`.
 
