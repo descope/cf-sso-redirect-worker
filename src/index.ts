@@ -3,6 +3,7 @@ import projectConfig from './projectConfig.json';
 type SsoConfig = {
   enabled?: boolean;  // defaults to true
   logOnly?: boolean;  // defaults to false — logs the intended rewrite but forwards the original request unchanged
+  rewriteAnyRelayState?: boolean;  // defaults to false — also rewrite SAML responses carrying a non-Descope RelayState (breaks gradual migration: the old provider's SP-initiated responses would reach Descope)
 };
 
 // SCIM tenants: '*' = pass all requests through without token replacement
@@ -195,13 +196,19 @@ export default {
 
       if (contentType.includes('application/x-www-form-urlencoded')) {
         const formData = await request.clone().formData();
+        const samlResponse = formData.get('SAMLResponse')?.toString();
         const relayState = formData.get('RelayState')?.toString();
 
-        if (relayState?.startsWith('s/')) {
+        if (!samlResponse) {
+          console.log('Form POST without SAMLResponse, forwarding as-is');
+        } else if (relayState?.startsWith('s/')) {
           console.log('Descope SP-initiated SAML request detected');
           shouldRewrite = true;
         } else if (!relayState) {
           console.log('IDP-initiated SAML request detected (no RelayState)');
+          shouldRewrite = true;
+        } else if (config.sso?.rewriteAnyRelayState) {
+          console.log('SAML request with non-Descope RelayState detected, rewriting (rewriteAnyRelayState):', relayState);
           shouldRewrite = true;
         } else {
           console.log('RelayState exists but not Descope format, forwarding as-is:', relayState);

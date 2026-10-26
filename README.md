@@ -35,6 +35,10 @@ The worker supports two SAML flows:
 - **SP-initiated**: The user starts login from your app. Descope sets a `RelayState` starting with `s/` on the SAML request, which is echoed back by the IdP in its POST response. The worker detects this and routes to the Descope ACS endpoint.
 - **IDP-initiated**: The user starts login directly from the IdP (no prior SP request, no `RelayState`). The worker detects the absence of `RelayState` and routes to the Descope ACS endpoint with the project ID appended as `?projectId=...`.
 
+Only form POSTs that carry a `SAMLResponse` are routed to Descope. Any other form POST is forwarded to the origin unchanged.
+
+A `SAMLResponse` with a non-Descope `RelayState` is forwarded to the origin by default, so tenants still on the old provider keep working during a gradual migration. Set `sso.rewriteAnyRelayState` to route those to Descope too, once no tenant depends on the old provider.
+
 A single worker instance can handle **multiple Descope projects** by mapping each incoming hostname to its own configuration in `src/projectConfig.json`.
 
 The worker also supports **SCIM provisioning** — when enabled per project, SCIM requests are proxied to Descope with path normalization and per-tenant token swapping based on the connection ID in the request path.
@@ -141,6 +145,7 @@ This file maps each incoming hostname to its Descope project. Each entry has a t
 |---|---|---|
 | `enabled` | `true` | Enable or disable SSO proxying for this hostname |
 | `logOnly` | `false` | When `true`, logs the intended rewrite but forwards the original request unchanged — useful for validating detection before going live |
+| `rewriteAnyRelayState` | `false` | When `true`, a `SAMLResponse` with a non-Descope `RelayState` (e.g. IdP-initiated logins that send an app-specific one) is also routed to Descope. Leave it off during a gradual migration: the old provider's SP-initiated responses carry its own `RelayState` and would be sent to Descope |
 
 SAML requests are rewritten to:
 ```
