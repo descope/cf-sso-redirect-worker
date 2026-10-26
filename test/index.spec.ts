@@ -34,6 +34,12 @@ vi.mock('../src/projectConfig.json', () => ({
         },
       },
     },
+    'any-relaystate.example.com': {
+      newCname: CNAME,
+      projectId: PROJECT_ID,
+      sso: { enabled: true, rewriteAnyRelayState: true },
+      scim: { enabled: false },
+    },
     'sso-disabled.example.com': {
       newCname: CNAME,
       projectId: PROJECT_ID,
@@ -185,8 +191,14 @@ describe('SSO Redirect Worker', () => {
   // ── Non-Descope RelayState ──────────────────────────────────────────────────
 
   describe('SAML POST with non-Descope RelayState', () => {
-    it('rewrites to Descope ACS URL (IdP-initiated with app RelayState)', async () => {
+    it('forwards the original request unchanged by default (gradual migration)', async () => {
       await callWorker(samlPost(HOSTNAME, 'some-other-value'));
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(new URL(called.url).hostname).toBe(HOSTNAME);
+    });
+
+    it('rewrites to Descope ACS URL when rewriteAnyRelayState is enabled', async () => {
+      await callWorker(samlPost('any-relaystate.example.com', 'some-other-value'));
       const called: Request = mockFetch.mock.calls[0][0];
       const url = new URL(called.url);
       expect(url.hostname).toBe(CNAME);
