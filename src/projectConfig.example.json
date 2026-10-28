@@ -12,7 +12,8 @@
 			"tenants": {
 				"<connection_id>": {
 					"tenantId": "<descope_tenant_id>",
-					"token": "Bearer <descope_project_id>:<descope_scim_token>"
+					"token": "Bearer <descope_project_id>:<descope_scim_token>",
+					"authHashes": ["<sha256_of_old_provider_authorization_header>"]
 				}
 			}
 		}

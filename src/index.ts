@@ -9,8 +9,9 @@ type SsoConfig = {
 // SCIM tenants: '*' = pass all requests through without token replacement
 // Record: connection ID extracted from the SCIM URL path (e.g. "con_OVM407qBECcvwRSG") → { tenantId, token }
 type ScimTenantEntry = {
-  tenantId: string; // Descope tenant ID — used for identification and logging
-  token: string;    // Authorization header value to forward to Descope, e.g. "Bearer <projectId>:<scimToken>"
+  tenantId: string;     // Descope tenant ID — used for identification and logging
+  token: string;        // Authorization header value to forward to Descope, e.g. "Bearer <projectId>:<scimToken>"
+  authHashes: string[]; // SHA-256 hex of the full incoming Authorization header value(s) the old provider issued — a list to allow token rotation
 };
 
 type ScimTenantMap = Record<string, ScimTenantEntry>;
@@ -61,27 +62,45 @@ function buildDescopeAcsUrl(inputUrl: string, config: ProjectConfig): string {
 }
 
 const SCIM_RESOURCE_TYPES = 'Users|Groups|Schemas|ServiceProviderConfig|ResourceTypes|Bulk|Me';
+const SCIM_RESOURCE_RE = new RegExp(`/(${SCIM_RESOURCE_TYPES})(/.*)?$`, 'i');
+
+// Provider SCIM base URLs this worker can intercept (they live on the customer's custom domain):
+//   Auth0:    /scim/v2/connections/<id>/Users
+//   Frontegg: /directory/resources/scim/v2.0/<id>/Users
+//   Okta:     /<id>/scim/v2/Users
+function isScimPath(pathname: string): boolean {
+  return /\/scim(\/|$)/i.test(pathname);
+}
 
 function normalizeScimPath(pathname: string): string {
-  // Strip any provider-specific segments between /scim/v2/ and the SCIM resource type.
+  // Strip any provider-specific segments before the SCIM resource type.
   // e.g. /scim/v2/connections/con_xxx/Users/123 → /scim/v2/Users/123
-  const match = pathname.match(new RegExp(`/(${SCIM_RESOURCE_TYPES})(/.*)?$`, 'i'));
+  const match = pathname.match(SCIM_RESOURCE_RE);
   if (match) {
     return `/scim/v2/${match[1]}${match[2] ?? ''}`;
   }
   return pathname;
 }
 
-function extractScimConnectionId(pathname: string): string | null {
-  // Grab the segment immediately before the SCIM resource type.
-  // e.g. /scim/v2/connections/con_OVM407qBECcvwRSG/Users → "con_OVM407qBECcvwRSG"
-  // e.g. /scim/v2/Users → null (no provider-specific segment)
-  const match = pathname.match(new RegExp(`/([^/]+)/(${SCIM_RESOURCE_TYPES})(?:/.*)?$`, 'i'));
-  if (!match) return null;
-  const candidate = match[1];
-  // Exclude standard path segments that are not connection IDs
-  if (candidate === 'v2') return null;
-  return candidate;
+function findScimConnectionId(pathname: string, tenants: ScimTenantMap): string | null {
+  // The connection ID is whichever path segment before the SCIM resource type is a key in the
+  // tenant map — its position differs per provider (see isScimPath), so don't assume one.
+  const match = pathname.match(SCIM_RESOURCE_RE);
+  const prefix = match ? pathname.slice(0, match.index) : pathname;
+  return prefix.split('/').find((segment) => Object.prototype.hasOwnProperty.call(tenants, segment)) ?? null;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function matchesAuthHash(authorization: string | null, authHashes: string[] | undefined): Promise<boolean> {
+  // Fail closed: a missing header or a tenant with no configured hashes is never authorized.
+  if (!authorization || !authHashes?.length) return false;
+  const hash = await sha256Hex(authorization);
+  // ponytail: plain compare is fine here — a timing leak only reveals the hash of attacker-chosen input
+  return authHashes.some((expected) => expected.toLowerCase() === hash);
 }
 
 function buildDescopeScimUrl(inputUrl: string, config: ProjectConfig): string {
@@ -135,7 +154,7 @@ export default {
     // ── SCIM ──────────────────────────────────────────────────────────────────
     const scimEnabled = config.scim?.enabled ?? false;
 
-    if (scimEnabled && requestUrl.pathname.startsWith('/scim')) {
+    if (scimEnabled && isScimPath(requestUrl.pathname)) {
       const targetUrl = buildDescopeScimUrl(request.url, config);
       const scimTenants = config.scim!.tenants ?? '*';
       const scimLogOnly = config.scim?.logOnly ?? false;
@@ -151,22 +170,32 @@ export default {
         console.log('SCIM request detected (all tenants), proxying to:', targetUrl);
       } else {
         // Tenant map — look up the connection ID extracted from the SCIM path
-        const connectionId = extractScimConnectionId(requestUrl.pathname);
-        const tenantEntry = connectionId ? (scimTenants as ScimTenantMap)[connectionId] : undefined;
+        const tenantMap = scimTenants as ScimTenantMap;
+        const connectionId = findScimConnectionId(requestUrl.pathname, tenantMap);
 
-        if (!connectionId || !tenantEntry) {
-          const idDescription = connectionId ?? '(none)';
+        if (!connectionId) {
           if (scimLogOnly) {
-            console.warn('[SCIM logOnly] would reject — unrecognized connection ID:', idDescription, '— forwarding original request unchanged');
+            console.warn('[SCIM logOnly] would reject — no recognized connection ID in path:', requestUrl.pathname, '— forwarding original request unchanged');
             return passThrough(request);
           }
-          console.warn('SCIM request rejected — unrecognized connection ID:', idDescription, 'for hostname:', hostname);
+          console.warn('SCIM request rejected — no recognized connection ID in path:', requestUrl.pathname, 'for hostname:', hostname);
           return new Response('Unauthorized', { status: 401 });
         }
+        const tenantEntry = tenantMap[connectionId];
+        const authorized = await matchesAuthHash(request.headers.get('Authorization'), tenantEntry.authHashes);
 
         if (scimLogOnly) {
-          console.log('[SCIM logOnly] would proxy to:', targetUrl, 'for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+          if (authorized) {
+            console.log('[SCIM logOnly] would proxy to:', targetUrl, 'for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+          } else {
+            console.warn('[SCIM logOnly] would reject — Authorization header does not match authHashes for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+          }
           return passThrough(request);
+        }
+
+        if (!authorized) {
+          console.warn('SCIM request rejected — Authorization header does not match authHashes for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ')');
+          return new Response('Unauthorized', { status: 401 });
         }
 
         console.log('SCIM request detected for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — proxying to:', targetUrl);
