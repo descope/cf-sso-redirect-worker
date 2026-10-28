@@ -9,10 +9,13 @@ const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 // vi.hoisted ensures these are available inside the vi.mock factory below,
 // which is hoisted to run before any imports are evaluated.
 
-const { HOSTNAME, CNAME, PROJECT_ID } = vi.hoisted(() => ({
+const { HOSTNAME, CNAME, PROJECT_ID, IDP_TOKEN_HASH, ROTATED_TOKEN_HASH } = vi.hoisted(() => ({
   HOSTNAME: 'login.example.com',
   CNAME: 'auth.example.com',
   PROJECT_ID: 'TestProjectId123',
+  // SHA-256 of 'Bearer idp-token' and 'Bearer rotated-idp-token'
+  IDP_TOKEN_HASH: 'd2b8331133f778f455f6d4484ebdb2d6faf38b7dd3830b80d65aa0bb2f6e11cb',
+  ROTATED_TOKEN_HASH: 'c15f21643c4ca164048153b39e7a9c3da6e31b9da133f8b844d26ba925314466',
 }));
 
 // ── Config mock ───────────────────────────────────────────────────────────────
@@ -30,6 +33,11 @@ vi.mock('../src/projectConfig.json', () => ({
           con_test123: {
             tenantId: 'descope-tenant-abc',
             token: `Bearer ${PROJECT_ID}:scim-token-abc`,
+            authHashes: [IDP_TOKEN_HASH, ROTATED_TOKEN_HASH],
+          },
+          con_nohash: {
+            tenantId: 'descope-tenant-nohash',
+            token: `Bearer ${PROJECT_ID}:scim-token-nohash`,
           },
         },
       },
@@ -69,6 +77,7 @@ vi.mock('../src/projectConfig.json', () => ({
           con_test123: {
             tenantId: 'descope-tenant-abc',
             token: `Bearer ${PROJECT_ID}:scim-token-abc`,
+            authHashes: [IDP_TOKEN_HASH],
           },
         },
       },
@@ -270,7 +279,7 @@ describe('SSO Redirect Worker', () => {
     it('normalizes path and swaps Authorization header', async () => {
       const req = new IncomingRequest(
         `https://${HOSTNAME}/scim/v2/connections/con_test123/Users/user_456`,
-        { headers: { Authorization: 'Bearer idp-original-token' } },
+        { headers: { Authorization: 'Bearer idp-token' } },
       );
       await callWorker(req);
       const called: Request = mockFetch.mock.calls[0][0];
@@ -334,6 +343,45 @@ describe('SSO Redirect Worker', () => {
       const response = await callWorker(req);
       expect(response.status).toBe(401);
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── SCIM tenant map — incoming Authorization check ──────────────────────────
+
+  describe('SCIM with tenant map — Authorization check', () => {
+    const scimRequest = (connectionId: string, authorization?: string) =>
+      new IncomingRequest(`https://${HOSTNAME}/scim/v2/connections/${connectionId}/Users`, {
+        headers: authorization ? { Authorization: authorization } : {},
+      });
+
+    it('accepts any of the configured hashes (token rotation)', async () => {
+      await callWorker(scimRequest('con_test123', 'Bearer rotated-idp-token'));
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(called.headers.get('Authorization')).toBe(`Bearer ${PROJECT_ID}:scim-token-abc`);
+    });
+
+    for (const [name, connectionId, authorization] of [
+      ['a wrong token', 'con_test123', 'Bearer attacker-token'],
+      ['a missing Authorization header', 'con_test123', undefined],
+      ['a tenant with no authHashes configured', 'con_nohash', 'Bearer idp-token'],
+    ] as const) {
+      it(`returns 401 for ${name} without calling fetch`, async () => {
+        const response = await callWorker(scimRequest(connectionId, authorization));
+        expect(response.status).toBe(401);
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+    }
+
+    it('logOnly: a wrong token is logged as a would-be rejection and passed through unchanged', async () => {
+      const req = new IncomingRequest(
+        'https://scim-logonly-tenants.example.com/scim/v2/connections/con_test123/Users',
+        { headers: { Authorization: 'Bearer attacker-token' } },
+      );
+      const response = await callWorker(req);
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(response.status).not.toBe(401);
+      expect(new URL(called.url).hostname).toBe('scim-logonly-tenants.example.com');
+      expect(called.headers.get('Authorization')).toBe('Bearer attacker-token');
     });
   });
 

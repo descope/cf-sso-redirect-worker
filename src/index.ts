@@ -9,8 +9,9 @@ type SsoConfig = {
 // SCIM tenants: '*' = pass all requests through without token replacement
 // Record: connection ID extracted from the SCIM URL path (e.g. "con_OVM407qBECcvwRSG") → { tenantId, token }
 type ScimTenantEntry = {
-  tenantId: string; // Descope tenant ID — used for identification and logging
-  token: string;    // Authorization header value to forward to Descope, e.g. "Bearer <projectId>:<scimToken>"
+  tenantId: string;     // Descope tenant ID — used for identification and logging
+  token: string;        // Authorization header value to forward to Descope, e.g. "Bearer <projectId>:<scimToken>"
+  authHashes: string[]; // SHA-256 hex of the full incoming Authorization header value(s) the old provider issued — a list to allow token rotation
 };
 
 type ScimTenantMap = Record<string, ScimTenantEntry>;
@@ -87,6 +88,19 @@ function findScimConnectionId(pathname: string, tenants: ScimTenantMap): string 
   const match = pathname.match(SCIM_RESOURCE_RE);
   const prefix = match ? pathname.slice(0, match.index) : pathname;
   return prefix.split('/').find((segment) => Object.prototype.hasOwnProperty.call(tenants, segment)) ?? null;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function matchesAuthHash(authorization: string | null, authHashes: string[] | undefined): Promise<boolean> {
+  // Fail closed: a missing header or a tenant with no configured hashes is never authorized.
+  if (!authorization || !authHashes?.length) return false;
+  const hash = await sha256Hex(authorization);
+  // ponytail: plain compare is fine here — a timing leak only reveals the hash of attacker-chosen input
+  return authHashes.some((expected) => expected.toLowerCase() === hash);
 }
 
 function buildDescopeScimUrl(inputUrl: string, config: ProjectConfig): string {
@@ -168,10 +182,20 @@ export default {
           return new Response('Unauthorized', { status: 401 });
         }
         const tenantEntry = tenantMap[connectionId];
+        const authorized = await matchesAuthHash(request.headers.get('Authorization'), tenantEntry.authHashes);
 
         if (scimLogOnly) {
-          console.log('[SCIM logOnly] would proxy to:', targetUrl, 'for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+          if (authorized) {
+            console.log('[SCIM logOnly] would proxy to:', targetUrl, 'for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+          } else {
+            console.warn('[SCIM logOnly] would reject — Authorization header does not match authHashes for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+          }
           return passThrough(request);
+        }
+
+        if (!authorized) {
+          console.warn('SCIM request rejected — Authorization header does not match authHashes for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ')');
+          return new Response('Unauthorized', { status: 401 });
         }
 
         console.log('SCIM request detected for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — proxying to:', targetUrl);

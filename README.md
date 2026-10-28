@@ -123,7 +123,8 @@ This file maps each incoming hostname to its Descope project. Each entry has a t
       "tenants": {
         "<connection_id>": {
           "tenantId": "<descope_tenant_id>",
-          "token": "Bearer <descope_project_id>:<descope_scim_token>"
+          "token": "Bearer <descope_project_id>:<descope_scim_token>",
+          "authHashes": ["<sha256_of_old_provider_authorization_header>"]
         }
       }
     }
@@ -183,17 +184,23 @@ Each entry maps that segment to a Descope tenant and its SCIM token:
 "tenants": {
   "con_OVM407qBECcvwRSG": {
     "tenantId": "T2abc123",
-    "token": "Bearer <projectId>:<scimToken>"
+    "token": "Bearer <projectId>:<scimToken>",
+    "authHashes": ["<sha256 of the old provider's Authorization header>"]
   },
   "tenant_xyz": {
     "tenantId": "T2xyz456",
-    "token": "Bearer <projectId>:<anotherScimToken>"
+    "token": "Bearer <projectId>:<anotherScimToken>",
+    "authHashes": ["<current token hash>", "<rotated token hash>"]
   }
 }
 ```
 
-- Requests whose segment is found in the map have their `Authorization` header replaced with the mapped Descope token before being forwarded.
-- Requests with **no** path segment in the map are rejected with `401 Unauthorized`.
+- **`authHashes` (required)** — SHA-256 hex digests of the full `Authorization` header value the customer's IdP sends today (the token the old provider issued). The connection ID in the URL is not a secret, so the worker only swaps in the Descope token when the incoming header matches one of these hashes. List more than one to cover token rotation. Compute a hash with:
+  ```sh
+  printf '%s' 'Bearer <old_provider_scim_token>' | shasum -a 256
+  ```
+- Requests whose segment is found in the map **and** whose `Authorization` header matches `authHashes` have that header replaced with the mapped Descope token before being forwarded.
+- Requests with **no** path segment in the map, a missing or non-matching `Authorization` header, or a tenant with no `authHashes` are rejected with `401 Unauthorized`. In `logOnly` mode a token mismatch is logged as `[SCIM logOnly] would reject — Authorization header does not match authHashes ...` — use this to confirm every tenant's hash before going live.
 - The SCIM token can be generated in the Descope console under **Access Keys**.
 
 **Path normalization** — the worker automatically strips provider-specific segments from the SCIM path and rewrites to the standard format:
@@ -227,7 +234,8 @@ Supported SCIM resource types: `Users`, `Groups`, `Schemas`, `ServiceProviderCon
       "tenants": {
         "con_xyz": {
           "tenantId": "T2tenant1",
-          "token": "Bearer ProjectIdB:scimToken1"
+          "token": "Bearer ProjectIdB:scimToken1",
+          "authHashes": ["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"]
         }
       }
     }
