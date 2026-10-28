@@ -308,6 +308,35 @@ describe('SSO Redirect Worker', () => {
     });
   });
 
+  // ── SCIM tenant map — other providers' URL shapes ───────────────────────────
+
+  describe('SCIM with tenant map — provider URL shapes', () => {
+    for (const path of [
+      '/directory/resources/scim/v2.0/con_test123/Users', // Frontegg
+      '/con_test123/scim/v2/Users', // Okta
+    ]) {
+      it(`finds the connection ID in ${path}`, async () => {
+        const req = new IncomingRequest(`https://${HOSTNAME}${path}`, {
+          headers: { Authorization: 'Bearer idp-token' },
+        });
+        await callWorker(req);
+        const called: Request = mockFetch.mock.calls[0][0];
+        expect(new URL(called.url).hostname).toBe(CNAME);
+        expect(called.headers.get('Authorization')).toBe(`Bearer ${PROJECT_ID}:scim-token-abc`);
+      });
+    }
+
+    it('rejects a Frontegg path with an unknown ID (v2.0 is not mistaken for one)', async () => {
+      const req = new IncomingRequest(
+        `https://${HOSTNAME}/directory/resources/scim/v2.0/con_unknown/Users`,
+        { headers: { Authorization: 'Bearer idp-token' } },
+      );
+      const response = await callWorker(req);
+      expect(response.status).toBe(401);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
   // ── SCIM tenant map — unknown connection ────────────────────────────────────
 
   describe('SCIM with tenant map — unknown connection ID', () => {
@@ -370,6 +399,10 @@ describe('SSO Redirect Worker', () => {
       ['/scim/v2/connections/con_test123/Schemas', '/scim/v2/Schemas'],
       ['/scim/v2/connections/con_test123/ServiceProviderConfig', '/scim/v2/ServiceProviderConfig'],
       ['/scim/v2/connections/con_test123/ResourceTypes', '/scim/v2/ResourceTypes'],
+      // Frontegg: https://<custom-domain>/directory/resources/scim/v2.0/<id>
+      ['/directory/resources/scim/v2.0/con_test123/Users/uid_123', '/scim/v2/Users/uid_123'],
+      // Okta inbound SCIM: https://<okta-domain>/<connectionId>/scim/v2
+      ['/con_test123/scim/v2/Groups', '/scim/v2/Groups'],
     ] as const;
 
     for (const [input, expected] of cases) {
