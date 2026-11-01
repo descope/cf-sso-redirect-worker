@@ -95,12 +95,11 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function matchesAuthHash(authorization: string | null, authHashes: string[] | undefined): Promise<boolean> {
+function matchesAuthHash(incomingHash: string | null, authHashes: string[] | undefined): boolean {
   // Fail closed: a missing header or a tenant with no configured hashes is never authorized.
-  if (!authorization || !authHashes?.length) return false;
-  const hash = await sha256Hex(authorization);
+  if (!incomingHash || !authHashes?.length) return false;
   // ponytail: plain compare is fine here — a timing leak only reveals the hash of attacker-chosen input
-  return authHashes.some((expected) => expected.toLowerCase() === hash);
+  return authHashes.some((expected) => expected.toLowerCase() === incomingHash);
 }
 
 function buildDescopeScimUrl(inputUrl: string, config: ProjectConfig): string {
@@ -182,15 +181,20 @@ export default {
           return new Response('Unauthorized', { status: 401 });
         }
         const tenantEntry = tenantMap[connectionId];
-        const authorized = await matchesAuthHash(request.headers.get('Authorization'), tenantEntry.authHashes);
+        const authorization = request.headers.get('Authorization');
+        const incomingHash = authorization ? await sha256Hex(authorization) : null;
+        const authorized = matchesAuthHash(incomingHash, tenantEntry.authHashes);
 
         if (scimLogOnly) {
           if (authorized) {
             console.log('[SCIM logOnly] would proxy to:', targetUrl, 'for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
-          } else {
-            console.warn('[SCIM logOnly] would reject — Authorization header does not match authHashes for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
+            return passThrough(request);
           }
-          return passThrough(request);
+          // Log only the hash, never the token. The old provider's status tells whether the token is genuine:
+          // a 2xx means it's the IdP's real token and the hash can be added to authHashes.
+          const response = await passThrough(request);
+          console.warn('[SCIM logOnly] would reject — Authorization header does not match authHashes for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — incoming Authorization sha256:', incomingHash ?? '(no header)', '— old provider responded:', response.status);
+          return response;
         }
 
         if (!authorized) {
