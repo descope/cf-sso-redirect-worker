@@ -41,7 +41,14 @@ A `SAMLResponse` with a non-Descope `RelayState` is forwarded to the origin by d
 
 A single worker instance can handle **multiple Descope projects** by mapping each incoming hostname to its own configuration in `src/projectConfig.json`.
 
-The worker also supports **SCIM provisioning** — when enabled per project, SCIM requests are proxied to Descope with path normalization and per-tenant token swapping based on the connection ID in the request path.
+The worker also supports **SCIM provisioning**. When it's enabled for a project, the worker proxies SCIM requests to Descope:
+
+- It rewrites the provider's SCIM path to Descope's standard `/scim/v2/...` format. Auth0, Frontegg and Okta URL formats are supported.
+- It finds the tenant from the connection ID in the path.
+- It checks that the caller's `Authorization` header is the token the old provider issued.
+- It then swaps in that tenant's Descope SCIM token.
+
+The customer's IdP (Entra ID, Okta, OneLogin, …) keeps its existing SCIM URL and token.
 
 
 
@@ -96,7 +103,7 @@ Alternatively, `wrangler login` will auto-detect the account ID so no variable i
 
 ### 3. Configure `src/projectConfig.json`
 
-> **Important:** `src/projectConfig.json` is listed in `.gitignore` because it contains SCIM bearer tokens. **Never commit it with real values.**
+> **Important:** `src/projectConfig.json` is listed in `.gitignore` because it holds customer-specific values. Keep Descope SCIM tokens out of it: store each one as a Worker secret and reference it by name with `tokenSecret` (see the `scim` block below). **Never commit it with real values.**
 
 Copy the example file and fill in your values:
 
@@ -123,7 +130,8 @@ This file maps each incoming hostname to its Descope project. Each entry has a t
       "tenants": {
         "<connection_id>": {
           "tenantId": "<descope_tenant_id>",
-          "token": "Bearer <descope_project_id>:<descope_scim_token>"
+          "tokenSecret": "SCIM_TOKEN_TENANT_A",
+          "authHashes": ["<sha256_of_old_provider_authorization_header>"]
         }
       }
     }
@@ -157,34 +165,57 @@ https://<newCname>/v1/auth/saml/acs?projectId=<projectId>
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Enable or disable SCIM proxying for this hostname |
-| `logOnly` | `false` | When `true`, still runs the full tenant lookup but only logs the outcome — a would-be proxy (`[SCIM logOnly] would proxy to: ...`) or a would-be rejection (`[SCIM logOnly] would reject — unrecognized connection ID: ...`) — and always forwards the original request unchanged instead of proxying or returning 401. Useful for validating both routing and tenant-ID recognition before going live |
-| `tenants` | `"*"` | `"*"` = proxy all requests, forwarding the original `Authorization` header as-is; map = per-tenant token swap (see below) |
+| `logOnly` | `false` | When `true`, the worker still runs the full tenant lookup and `Authorization` check, but it only logs the outcome. It always forwards the original request to the old provider unchanged, instead of proxying to Descope or returning 401. Possible log lines: `[SCIM logOnly] would proxy to: ...` (everything matched); `[SCIM logOnly] would reject — no recognized connection ID in path: ...`; or `[SCIM logOnly] would reject — Authorization header does not match authHashes ...`, which also includes the incoming header's SHA-256 and the old provider's response status. Use it to validate routing, tenant recognition and token hashes before going live |
+| `tenants` | `"*"` | `"*"` = proxy all requests and forward the original `Authorization` header as-is. Descope validates it, so it must already be a Descope token. Map = per-tenant token check and swap (see below) |
 
-**Tenant map** — when `tenants` is an object, each key must equal the path segment that appears **immediately before the SCIM resource type** in the incoming URL, regardless of what that segment represents in your IdP (connection ID, tenant slug, org ID, etc.):
+**Supported providers** — any request with a `/scim` path segment on the configured hostname is treated as SCIM. The worker can only intercept SCIM traffic that the old provider serves on the customer's own domain:
+
+| Provider | SCIM base URL given to the IdP | Key in `tenants` |
+|---|---|---|
+| Auth0 | `https://<custom-domain>/scim/v2/connections/<id>` | `<id>` |
+| Frontegg | `https://<custom-domain>/directory/resources/scim/v2.0/<id>` | `<id>` |
+| Okta (inbound SCIM) | `https://<okta-domain>/<connectionId>/scim/v2` | `<connectionId>` |
+| PingOne | `https://scim-api.pingone.<region>/environments/<envId>/v2` | **Not supported** — served on Ping's domain (no custom domain), authenticated with short-lived Worker-app access tokens. Repoint the SCIM client to Descope instead |
+
+**Tenant map** — when `tenants` is an object, the worker looks at the path segments before the SCIM resource type and uses whichever one is a key in the map, regardless of its position or what it represents in your IdP (connection ID, tenant slug, org ID, etc.):
 
 ```
-/scim/v2/connections/con_OVM407qBECcvwRSG/Users  →  key is "con_OVM407qBECcvwRSG"
-/scim/v2/tenants/tenant_xyz/Groups               →  key is "tenant_xyz"
-/scim/v2/orgs/org_abc/Users                      →  key is "org_abc"
+/scim/v2/connections/con_OVM407qBECcvwRSG/Users            →  key is "con_OVM407qBECcvwRSG"
+/directory/resources/scim/v2.0/0f6b2c1e-.../Users          →  key is "0f6b2c1e-..."
+/0oa1b2c3d4/scim/v2/Groups                                 →  key is "0oa1b2c3d4"
 ```
 
-Each entry maps that segment to a Descope tenant and its SCIM token:
+Each entry maps that segment to a Descope tenant, the Worker secret holding that tenant's Descope SCIM token, and the hashes of the old provider's token:
 
 ```json
 "tenants": {
   "con_OVM407qBECcvwRSG": {
     "tenantId": "T2abc123",
-    "token": "Bearer <projectId>:<scimToken>"
+    "tokenSecret": "SCIM_TOKEN_T2ABC123",
+    "authHashes": ["<sha256 of the old provider's Authorization header>"]
   },
   "tenant_xyz": {
     "tenantId": "T2xyz456",
-    "token": "Bearer <projectId>:<anotherScimToken>"
+    "tokenSecret": "SCIM_TOKEN_T2XYZ456",
+    "authHashes": ["<current token hash>", "<rotated token hash>"]
   }
 }
 ```
 
-- Requests whose segment is found in the map have their `Authorization` header replaced with the mapped Descope token before being forwarded.
-- Requests whose segment is **not** in the map are rejected with `401 Unauthorized`.
+- **`tokenSecret`** is the name of a [Worker secret](https://developers.cloudflare.com/workers/configuration/secrets/) whose value is the `Authorization` header to send to Descope, `Bearer <projectId>:<accessKey>`. Secrets are encrypted by Cloudflare and never appear in the config, the code, or the logs. Set one with:
+  ```sh
+  npx wrangler secret put SCIM_TOKEN_T2ABC123
+  # paste: Bearer <projectId>:<accessKey>
+  ```
+  If the secret is missing at runtime, the request gets `500` and the worker logs `SCIM request failed — no Descope token ... Worker secret "<name>" is not set`. In `logOnly` mode it logs `[SCIM logOnly] would fail — no Descope token ...` instead.
+  You can still put the value inline as `token`, but it's then stored as plaintext in the config, so prefer `tokenSecret`. When both are set, `tokenSecret` wins.
+- **`authHashes` (required)** — SHA-256 hex digests of the full `Authorization` header value the customer's IdP sends today (the token the old provider issued). The connection ID in the URL is not a secret, so the worker only swaps in the Descope token when the incoming header matches one of these hashes. List more than one to cover token rotation. Compute a hash with:
+  ```sh
+  printf '%s' 'Bearer <old_provider_scim_token>' | shasum -a 256
+  ```
+  Don't have the old token? Run with `logOnly: true` and wait for the IdP's next sync. Each mismatch logs `incoming Authorization sha256: <hash>` and `old provider responded: <status>`. A 2xx from the old provider means the token is genuine, so copy that hash into `authHashes`. The token itself is never logged.
+- Requests whose segment is found in the map **and** whose `Authorization` header matches `authHashes` have that header replaced with the mapped Descope token before being forwarded.
+- Requests with **no** path segment in the map, a missing or non-matching `Authorization` header, or a tenant with no `authHashes` are rejected with `401 Unauthorized`. In `logOnly` mode a token mismatch is logged as `[SCIM logOnly] would reject — Authorization header does not match authHashes ...` — use this to confirm every tenant's hash before going live.
 - The SCIM token can be generated in the Descope console under **Access Keys**.
 
 **Path normalization** — the worker automatically strips provider-specific segments from the SCIM path and rewrites to the standard format:
@@ -192,9 +223,24 @@ Each entry maps that segment to a Descope tenant and its SCIM token:
 ```
 /scim/v2/connections/con_abc/Users/123  →  /scim/v2/Users/123
 /scim/v2/tenants/tenant_xyz/Groups      →  /scim/v2/Groups
+/directory/resources/scim/v2.0/abc/Users →  /scim/v2/Users
+/0oa1b2c3d4/scim/v2/Groups              →  /scim/v2/Groups
 ```
 
 Supported SCIM resource types: `Users`, `Groups`, `Schemas`, `ServiceProviderConfig`, `ResourceTypes`, `Bulk`, `Me`.
+
+#### SCIM migration walkthrough
+
+For each tenant you're moving:
+
+1. **Create the Descope side.** Create the tenant in Descope, and generate a SCIM access key for it under **Access Keys**. Store the key as a Worker secret with `npx wrangler secret put SCIM_TOKEN_<TENANT>`, using the value `Bearer <projectId>:<accessKey>`. In `tenants`, add an entry keyed by the old provider's connection ID, with `tenantId` and `tokenSecret: "SCIM_TOKEN_<TENANT>"`.
+2. **Get the old token's hash.** If you have the old provider's SCIM token, hash it as shown above. If you don't, deploy with `scim.logOnly: true` and run `npx wrangler tail`. Then trigger a sync from the IdP ("Provision on demand" in Entra, "Force sync" in Okta) or wait for the next cycle. Copy the logged `incoming Authorization sha256` from a request where `old provider responded` is 2xx.
+3. **Dry run.** Redeploy, still with `logOnly: true`. Every request from that tenant's IdP should now log `[SCIM logOnly] would proxy to: ... for tenant: <tenantId>`.
+4. **Go live.** Set `logOnly: false` and redeploy. Requests are now verified, have their token swapped, and are sent to Descope. Unknown connection IDs and wrong tokens get `401`.
+
+> **How the token check works:** the IdP sends `Authorization: <old provider token>`. The worker computes the SHA-256 of that full header value and compares it against `authHashes`. On a match, it replaces the header with the tenant's Descope token, read from the `tokenSecret` Worker secret, before forwarding. Descope validates that token as usual. The config only holds hashes of the old tokens and secret names, never a usable credential, and the worker never logs a raw token.
+
+> **Upgrading from a version without `authHashes`:** this is a breaking change for tenant-map configs. Tenant entries without `authHashes` now get `401`. Add hashes, using step 2 if needed, before deploying with `logOnly: false`. `tenants: "*"` configs are unaffected.
 
 #### Multiple projects example
 
@@ -216,7 +262,8 @@ Supported SCIM resource types: `Users`, `Groups`, `Schemas`, `ServiceProviderCon
       "tenants": {
         "con_xyz": {
           "tenantId": "T2tenant1",
-          "token": "Bearer ProjectIdB:scimToken1"
+          "tokenSecret": "SCIM_TOKEN_T2TENANT1",
+          "authHashes": ["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"]
         }
       }
     }
