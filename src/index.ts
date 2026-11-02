@@ -7,10 +7,11 @@ type SsoConfig = {
 };
 
 // SCIM tenants: '*' = pass all requests through without token replacement
-// Record: connection ID extracted from the SCIM URL path (e.g. "con_OVM407qBECcvwRSG") → { tenantId, token }
+// Record: connection ID extracted from the SCIM URL path (e.g. "con_OVM407qBECcvwRSG") → { tenantId, tokenSecret, authHashes }
 type ScimTenantEntry = {
   tenantId: string;     // Descope tenant ID — used for identification and logging
-  token: string;        // Authorization header value to forward to Descope, e.g. "Bearer <projectId>:<scimToken>"
+  tokenSecret?: string; // Name of a Worker secret (`wrangler secret put <name>`) holding the Authorization header value to forward to Descope, e.g. "Bearer <projectId>:<scimToken>"
+  token?: string;       // Same value inline in the config — plaintext, prefer tokenSecret. Ignored when tokenSecret is set
   authHashes: string[]; // SHA-256 hex of the full incoming Authorization header value(s) the old provider issued — a list to allow token rotation
 };
 
@@ -124,7 +125,7 @@ function passThrough(request: Request): Promise<Response> {
 }
 
 export default {
-  async fetch(request, _env, _ctx): Promise<Response> {
+  async fetch(request, env, _ctx): Promise<Response> {
     // Short-circuit: sentinel set by a prior passThrough() call.
     // Strip the header so origin does not see it, then forward.
     if (request.headers.get(PASS_HEADER)) {
@@ -184,8 +185,18 @@ export default {
         const authorization = request.headers.get('Authorization');
         const incomingHash = authorization ? await sha256Hex(authorization) : null;
         const authorized = matchesAuthHash(incomingHash, tenantEntry.authHashes);
+        const descopeToken = tenantEntry.tokenSecret
+          ? (env as unknown as Record<string, string | undefined>)[tenantEntry.tokenSecret]
+          : tenantEntry.token;
+        const missingTokenMessage = tenantEntry.tokenSecret
+          ? `Worker secret "${tenantEntry.tokenSecret}" is not set`
+          : 'neither tokenSecret nor token is configured';
 
         if (scimLogOnly) {
+          if (authorized && !descopeToken) {
+            console.warn('[SCIM logOnly] would fail — no Descope token for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') —', missingTokenMessage, '— forwarding original request unchanged');
+            return passThrough(request);
+          }
           if (authorized) {
             console.log('[SCIM logOnly] would proxy to:', targetUrl, 'for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — forwarding original request unchanged');
             return passThrough(request);
@@ -202,8 +213,13 @@ export default {
           return new Response('Unauthorized', { status: 401 });
         }
 
+        if (!descopeToken) {
+          console.error('SCIM request failed — no Descope token for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') —', missingTokenMessage);
+          return new Response('SCIM proxy misconfigured', { status: 500 });
+        }
+
         console.log('SCIM request detected for tenant:', tenantEntry.tenantId, '(connection:', connectionId, ') — proxying to:', targetUrl);
-        scimHeaders.set('Authorization', tenantEntry.token);
+        scimHeaders.set('Authorization', descopeToken);
       }
 
       return fetch(new Request(targetUrl, {

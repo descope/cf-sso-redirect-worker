@@ -35,6 +35,16 @@ vi.mock('../src/projectConfig.json', () => ({
             token: `Bearer ${PROJECT_ID}:scim-token-abc`,
             authHashes: [IDP_TOKEN_HASH, ROTATED_TOKEN_HASH],
           },
+          con_secret: {
+            tenantId: 'descope-tenant-secret',
+            tokenSecret: 'SCIM_TOKEN_TEST',
+            authHashes: [IDP_TOKEN_HASH],
+          },
+          con_unset_secret: {
+            tenantId: 'descope-tenant-unset',
+            tokenSecret: 'SCIM_TOKEN_UNSET',
+            authHashes: [IDP_TOKEN_HASH],
+          },
           con_nohash: {
             tenantId: 'descope-tenant-nohash',
             token: `Bearer ${PROJECT_ID}:scim-token-nohash`,
@@ -99,7 +109,8 @@ function samlPost(hostname: string, relayState?: string) {
 
 async function callWorker(request: Request<unknown, IncomingRequestCfProperties>) {
   const ctx = createExecutionContext();
-  const response = await worker.fetch(request, env, ctx);
+  const testEnv = { ...env, SCIM_TOKEN_TEST: `Bearer ${PROJECT_ID}:scim-token-from-secret` } as typeof env;
+  const response = await worker.fetch(request, testEnv, ctx);
   await waitOnExecutionContext(ctx);
   return response;
 }
@@ -382,6 +393,28 @@ describe('SSO Redirect Worker', () => {
       expect(response.status).not.toBe(401);
       expect(new URL(called.url).hostname).toBe('scim-logonly-tenants.example.com');
       expect(called.headers.get('Authorization')).toBe('Bearer attacker-token');
+    });
+  });
+
+  // ── SCIM tenant map — Descope token from a Worker secret ─────────────────────
+
+  describe('SCIM with tenant map — tokenSecret', () => {
+    it('swaps in the Descope token read from the named Worker secret', async () => {
+      const req = new IncomingRequest(`https://${HOSTNAME}/scim/v2/connections/con_secret/Users`, {
+        headers: { Authorization: 'Bearer idp-token' },
+      });
+      await callWorker(req);
+      const called: Request = mockFetch.mock.calls[0][0];
+      expect(called.headers.get('Authorization')).toBe(`Bearer ${PROJECT_ID}:scim-token-from-secret`);
+    });
+
+    it('returns 500 without calling fetch when the named secret is not set', async () => {
+      const req = new IncomingRequest(`https://${HOSTNAME}/scim/v2/connections/con_unset_secret/Users`, {
+        headers: { Authorization: 'Bearer idp-token' },
+      });
+      const response = await callWorker(req);
+      expect(response.status).toBe(500);
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

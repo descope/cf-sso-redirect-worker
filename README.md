@@ -103,7 +103,7 @@ Alternatively, `wrangler login` will auto-detect the account ID so no variable i
 
 ### 3. Configure `src/projectConfig.json`
 
-> **Important:** `src/projectConfig.json` is listed in `.gitignore` because it contains SCIM bearer tokens. **Never commit it with real values.**
+> **Important:** `src/projectConfig.json` is listed in `.gitignore` because it holds customer-specific values. Keep Descope SCIM tokens out of it: store each one as a Worker secret and reference it by name with `tokenSecret` (see the `scim` block below). **Never commit it with real values.**
 
 Copy the example file and fill in your values:
 
@@ -130,7 +130,7 @@ This file maps each incoming hostname to its Descope project. Each entry has a t
       "tenants": {
         "<connection_id>": {
           "tenantId": "<descope_tenant_id>",
-          "token": "Bearer <descope_project_id>:<descope_scim_token>",
+          "tokenSecret": "SCIM_TOKEN_TENANT_A",
           "authHashes": ["<sha256_of_old_provider_authorization_header>"]
         }
       }
@@ -185,23 +185,30 @@ https://<newCname>/v1/auth/saml/acs?projectId=<projectId>
 /0oa1b2c3d4/scim/v2/Groups                                 →  key is "0oa1b2c3d4"
 ```
 
-Each entry maps that segment to a Descope tenant and its SCIM token:
+Each entry maps that segment to a Descope tenant, the Worker secret holding that tenant's Descope SCIM token, and the hashes of the old provider's token:
 
 ```json
 "tenants": {
   "con_OVM407qBECcvwRSG": {
     "tenantId": "T2abc123",
-    "token": "Bearer <projectId>:<scimToken>",
+    "tokenSecret": "SCIM_TOKEN_T2ABC123",
     "authHashes": ["<sha256 of the old provider's Authorization header>"]
   },
   "tenant_xyz": {
     "tenantId": "T2xyz456",
-    "token": "Bearer <projectId>:<anotherScimToken>",
+    "tokenSecret": "SCIM_TOKEN_T2XYZ456",
     "authHashes": ["<current token hash>", "<rotated token hash>"]
   }
 }
 ```
 
+- **`tokenSecret`** is the name of a [Worker secret](https://developers.cloudflare.com/workers/configuration/secrets/) whose value is the `Authorization` header to send to Descope, `Bearer <projectId>:<accessKey>`. Secrets are encrypted by Cloudflare and never appear in the config, the code, or the logs. Set one with:
+  ```sh
+  npx wrangler secret put SCIM_TOKEN_T2ABC123
+  # paste: Bearer <projectId>:<accessKey>
+  ```
+  If the secret is missing at runtime, the request gets `500` and the worker logs `SCIM request failed — no Descope token ... Worker secret "<name>" is not set`. In `logOnly` mode it logs `[SCIM logOnly] would fail — no Descope token ...` instead.
+  You can still put the value inline as `token`, but it's then stored as plaintext in the config, so prefer `tokenSecret`. When both are set, `tokenSecret` wins.
 - **`authHashes` (required)** — SHA-256 hex digests of the full `Authorization` header value the customer's IdP sends today (the token the old provider issued). The connection ID in the URL is not a secret, so the worker only swaps in the Descope token when the incoming header matches one of these hashes. List more than one to cover token rotation. Compute a hash with:
   ```sh
   printf '%s' 'Bearer <old_provider_scim_token>' | shasum -a 256
@@ -226,12 +233,12 @@ Supported SCIM resource types: `Users`, `Groups`, `Schemas`, `ServiceProviderCon
 
 For each tenant you're moving:
 
-1. **Create the Descope side.** Create the tenant in Descope, and generate a SCIM access key for it under **Access Keys**. In `tenants`, add an entry keyed by the old provider's connection ID, with `tenantId` and `token: "Bearer <projectId>:<accessKey>"`.
+1. **Create the Descope side.** Create the tenant in Descope, and generate a SCIM access key for it under **Access Keys**. Store the key as a Worker secret with `npx wrangler secret put SCIM_TOKEN_<TENANT>`, using the value `Bearer <projectId>:<accessKey>`. In `tenants`, add an entry keyed by the old provider's connection ID, with `tenantId` and `tokenSecret: "SCIM_TOKEN_<TENANT>"`.
 2. **Get the old token's hash.** If you have the old provider's SCIM token, hash it as shown above. If you don't, deploy with `scim.logOnly: true` and run `npx wrangler tail`. Then trigger a sync from the IdP ("Provision on demand" in Entra, "Force sync" in Okta) or wait for the next cycle. Copy the logged `incoming Authorization sha256` from a request where `old provider responded` is 2xx.
 3. **Dry run.** Redeploy, still with `logOnly: true`. Every request from that tenant's IdP should now log `[SCIM logOnly] would proxy to: ... for tenant: <tenantId>`.
 4. **Go live.** Set `logOnly: false` and redeploy. Requests are now verified, have their token swapped, and are sent to Descope. Unknown connection IDs and wrong tokens get `401`.
 
-> **How the token check works:** the IdP sends `Authorization: <old provider token>`. The worker computes the SHA-256 of that full header value and compares it against `authHashes`. On a match, it replaces the header with the tenant's Descope `token` before forwarding, and Descope validates that token as usual. The config only holds hashes of the old tokens, never the tokens themselves, and the worker never logs a raw token.
+> **How the token check works:** the IdP sends `Authorization: <old provider token>`. The worker computes the SHA-256 of that full header value and compares it against `authHashes`. On a match, it replaces the header with the tenant's Descope token, read from the `tokenSecret` Worker secret, before forwarding. Descope validates that token as usual. The config only holds hashes of the old tokens and secret names, never a usable credential, and the worker never logs a raw token.
 
 > **Upgrading from a version without `authHashes`:** this is a breaking change for tenant-map configs. Tenant entries without `authHashes` now get `401`. Add hashes, using step 2 if needed, before deploying with `logOnly: false`. `tenants: "*"` configs are unaffected.
 
@@ -255,7 +262,7 @@ For each tenant you're moving:
       "tenants": {
         "con_xyz": {
           "tenantId": "T2tenant1",
-          "token": "Bearer ProjectIdB:scimToken1",
+          "tokenSecret": "SCIM_TOKEN_T2TENANT1",
           "authHashes": ["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"]
         }
       }
